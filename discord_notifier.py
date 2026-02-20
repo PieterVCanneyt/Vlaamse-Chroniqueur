@@ -40,7 +40,7 @@ def post_to_discord(week_start_date: date, script: dict, doc_url: str) -> None:
 
 
 def _build_message(week_start_date: date, script: dict, doc_url: str) -> str:
-    monday_str = week_start_date.strftime("%-d %B %Y")
+    monday_str = week_start_date.strftime("%d %B %Y").lstrip("0")
     topic = script.get("topic", "Unknown Topic")
     period = script.get("period", "")
     location = script.get("location", "")

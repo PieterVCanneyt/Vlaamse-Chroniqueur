@@ -17,6 +17,11 @@ MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
 ALLOWED_MIME = {"image/jpeg", "image/png"}
 REQUEST_TIMEOUT = 10
 
+# Wikimedia requires a descriptive User-Agent to avoid 403 blocks
+HEADERS = {
+    "User-Agent": "VlaamseChroniqueur/1.0 (https://github.com/vlaamse-chroniqueur; contact@example.com)"
+}
+
 
 def find_image_url(query: str) -> str | None:
     """
@@ -50,7 +55,7 @@ def _search_commons(query: str, limit: int = 10) -> list[dict]:
         "prop": "imageinfo",
         "iiprop": "url|size|mime",
     }
-    resp = requests.get(COMMONS_API, params=params, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(COMMONS_API, params=params, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
 
     data = resp.json()

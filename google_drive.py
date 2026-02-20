@@ -69,7 +69,7 @@ def create_weekly_doc(week_start_date: date, script: dict) -> str:
 
     # Create empty document
     topic = script.get("topic", "Unknown Topic")
-    date_str = week_start_date.strftime("%-d %B %Y") if hasattr(week_start_date, "strftime") else str(week_start_date)
+    date_str = week_start_date.strftime("%d %B %Y").lstrip("0") if hasattr(week_start_date, "strftime") else str(week_start_date)
     title = f"Vlaamse Chroniqueur \u2014 Week of {date_str}: {topic}"
 
     doc = docs.documents().create(body={"title": title}).execute()
@@ -173,7 +173,7 @@ def _build_document_text(
         ))
 
     # --- Title ---
-    date_label = week_start_date.strftime("%-d %B %Y") if hasattr(week_start_date, "strftime") else str(week_start_date)
+    date_label = week_start_date.strftime("%d %B %Y").lstrip("0") if hasattr(week_start_date, "strftime") else str(week_start_date)
     topic_name = script.get("topic", "")
     title_start = pos()
     add(f"Vlaamse Chroniqueur \u2014 Week of {date_label}: {topic_name}\n")
@@ -223,36 +223,43 @@ def _build_document_text(
             if first_url:
                 image_placeholder(first_url)
 
-    # --- Script ---
-    heading1("Script")
-
-    script_content = script.get("script", {})
     image_urls = script.get("image_urls", [])
     image_idx = 1  # index 0 used in filming schedule
 
-    # Intro
-    heading2("Intro")
-    body(script_content.get("intro", ""))
+    def render_script_section(heading_label: str, script_content: dict) -> None:
+        nonlocal image_idx
 
-    if image_idx < len(image_urls) and image_urls[image_idx]:
-        image_placeholder(image_urls[image_idx])
-        image_idx += 1
+        heading1(heading_label)
 
-    # Sections
-    for section in script_content.get("sections", []):
-        heading2(section.get("title", ""))
-        loc_notes = section.get("location_notes", "")
-        if loc_notes:
-            body(f"Location: {loc_notes}", italic=True, color=COLOR_GREY)
-        body(section.get("commentary", ""))
+        # Intro
+        heading2("Intro")
+        body(script_content.get("intro", ""))
 
         if image_idx < len(image_urls) and image_urls[image_idx]:
             image_placeholder(image_urls[image_idx])
             image_idx += 1
 
-    # Outro
-    heading2("Outro")
-    body(script_content.get("outro", ""))
+        # Sections
+        for section in script_content.get("sections", []):
+            heading2(section.get("title", ""))
+            loc_notes = section.get("location_notes", "")
+            if loc_notes:
+                body(f"Locatie / Location: {loc_notes}", italic=True, color=COLOR_GREY)
+            body(section.get("commentary", ""))
+
+            if image_idx < len(image_urls) and image_urls[image_idx]:
+                image_placeholder(image_urls[image_idx])
+                image_idx += 1
+
+        # Outro
+        heading2("Outro")
+        body(script_content.get("outro", ""))
+
+    # --- Flemish Dutch script ---
+    render_script_section("Script \u2014 Nederlands", script.get("script_nl", {}))
+
+    # --- English script ---
+    render_script_section("Script \u2014 English", script.get("script_en", {}))
 
     # --- Editing Guide ---
     heading1("Editing Guide")
@@ -463,6 +470,45 @@ def _make_shareable(drive, doc_id: str) -> str:
         fileId=doc_id, fields="webViewLink"
     ).execute()
     return file_data["webViewLink"]
+
+
+def get_past_topics(folder_id: str) -> list[str]:
+    """
+    Return a list of past topic names, in creation order (oldest first), by
+    reading the titles of Google Docs in the given Drive folder.
+
+    Document titles follow the pattern:
+        "Vlaamse Chroniqueur — Week of {date}: {topic}"
+
+    Returns an empty list if the folder is empty, the env var is unset, or any
+    error occurs during the Drive API call.
+    """
+    try:
+        creds = _get_credentials()
+        drive = build("drive", "v3", credentials=creds)
+        results = drive.files().list(
+            q=(
+                f"'{folder_id}' in parents "
+                "and mimeType='application/vnd.google-apps.document' "
+                "and trashed=false"
+            ),
+            fields="files(name, createdTime)",
+            orderBy="createdTime asc",
+            pageSize=100,
+        ).execute()
+    except Exception as exc:
+        print(f"Warning: Could not fetch past topics from Drive: {exc}")
+        return []
+
+    topics: list[str] = []
+    for f in results.get("files", []):
+        name = f.get("name", "")
+        # Parse "Vlaamse Chroniqueur — Week of ...: {topic}"
+        if ":" in name:
+            topic = name.split(":", 1)[1].strip()
+            if topic:
+                topics.append(topic)
+    return topics
 
 
 def _get_credentials() -> Credentials:

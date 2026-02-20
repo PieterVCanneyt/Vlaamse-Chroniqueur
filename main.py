@@ -14,6 +14,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import traceback
@@ -23,7 +24,7 @@ from dotenv import load_dotenv
 
 from discord_notifier import post_to_discord
 from generator import generate_script, select_topic
-from google_drive import create_weekly_doc
+from google_drive import create_weekly_doc, get_past_topics
 from weather import geocode_location, get_weekly_weather
 from wikimedia import find_image_url
 
@@ -42,9 +43,20 @@ def main() -> None:
     print(f"Filming dates: {[d.isoformat() for d in filming_dates]}")
 
     try:
+        # Step 1: Load past topics for chronological continuity
+        folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+        past_topics: list[str] = []
+        if folder_id:
+            print("\n[0/6] Loading past topics from Google Drive...")
+            past_topics = get_past_topics(folder_id)
+            if past_topics:
+                print(f"      {len(past_topics)} past topic(s) found; last: {past_topics[-1]}")
+            else:
+                print("      No past topics found — starting from the beginning.")
+
         # Step 1: Select topic
         print("\n[1/6] Selecting topic...")
-        topic = select_topic(monday)
+        topic = select_topic(monday, past_topics)
 
         # Step 2: Geocode the filming location
         print(f"\n[2/6] Geocoding location: {topic['location']}")
@@ -56,19 +68,21 @@ def main() -> None:
             print("      Falling back to Ghent coordinates (51.0543, 3.7174).")
             lat, lon = 51.0543, 3.7174
 
-        # Step 3: Fetch weather at the filming location
-        print(f"\n[3/6] Fetching weather forecast...")
+        # Step 3: Fetch weather and pick the best single filming day
+        print("\n[3/6] Fetching weather forecast...")
         weather_data = get_weekly_weather(lat, lon, filming_dates)
         for w in weather_data:
-            status = "outdoor OK" if w.get("outdoor_ok") else "INDOOR recommended"
+            status = "outdoor OK" if w.get("outdoor_ok") else "indoor recommended"
             print(f"      {w['date']}: {w.get('condition', '?')} {w.get('temp_c', '?')}°C "
                   f"| rain {w.get('rain_mm', '?')} mm | {status}")
 
-        # Step 4: Generate full script
+        best_day = _select_best_filming_day(weather_data)
+        print(f"      → Best day: {best_day['date']} ({best_day.get('condition', '?')}, "
+              f"{'outdoor' if best_day.get('outdoor_ok') else 'indoor'})")
+
+        # Step 4: Generate full script for the chosen day
         print("\n[4/6] Generating full script...")
-        # Merge weather data back into the topic for the generator
-        full_topic = {**topic}
-        script = generate_script(full_topic, weather_data)
+        script = generate_script(topic, best_day)
         # Propagate topic-level fields into the script dict for downstream use
         script["topic"] = topic.get("topic", "")
         script["location"] = topic.get("location", "")
@@ -77,7 +91,7 @@ def main() -> None:
 
         # Step 5: Find Wikimedia images
         print("\n[5/6] Searching for images...")
-        image_queries = _build_image_queries(topic, script)
+        image_queries = _build_image_queries(topic)
         image_urls: list[str | None] = []
         for query in image_queries:
             url = find_image_url(query)
@@ -120,24 +134,48 @@ def get_upcoming_filming_dates(run_date: date) -> list[date]:
     return [monday, monday + timedelta(days=2), monday + timedelta(days=4)]
 
 
-def _build_image_queries(topic: dict, script: dict) -> list[str]:
+def _select_best_filming_day(weather_data: list[dict]) -> dict:
     """
-    Build a list of Wikimedia Commons search queries: one for the topic
-    overall and one per script section (up to 4 images total).
+    Pick the single best filming day from Mon/Wed/Fri weather options.
+    Prefers outdoor-ok days; among ties, lowest rain then highest temperature.
+    Falls back to the least-rainy day if all are indoor.
     """
+    outdoor = [w for w in weather_data if w.get("outdoor_ok")]
+    pool = outdoor if outdoor else weather_data
+    return min(pool, key=lambda w: (w.get("rain_mm") or 999, -(w.get("temp_c") or 0)))
+
+
+def _build_image_queries(topic: dict) -> list[str]:
+    """
+    Build a list of short Wikimedia Commons search queries (2-4 keywords each).
+    Wikimedia search matches against file names and descriptions, so brevity wins.
+    """
+    seen: set[str] = set()
     queries: list[str] = []
 
-    # Primary query from topic
-    primary = topic.get("wikimedia_search_query", "").strip()
-    if primary:
-        queries.append(primary)
+    def add(q: str) -> None:
+        q = q.strip()
+        if q and q not in seen:
+            seen.add(q)
+            queries.append(q)
 
-    # One query per section, derived from the section title + topic
-    topic_name = topic.get("topic", "")
-    for section in script.get("script", {}).get("sections", [])[:3]:
-        section_title = section.get("title", "").strip()
-        if section_title and topic_name:
-            queries.append(f"{topic_name} {section_title}")
+    # Primary query from the topic (Claude is asked to keep this to 3-5 keywords)
+    add(topic.get("wikimedia_search_query", ""))
+
+    # Topic name alone — often matches image file names directly
+    topic_name = topic.get("topic", "").strip()
+    add(topic_name)
+
+    # Location name alone (first two words)
+    location = topic.get("location", "").strip()
+    location_short = " ".join(location.split(",")[0].split()[:3])
+    add(location_short)
+
+    # Historical period keyword(s) + topic name
+    period = topic.get("period", "").strip()
+    period_keyword = period.split(",")[0].split()[0] if period else ""
+    if period_keyword and topic_name:
+        add(f"{topic_name} {period_keyword}")
 
     return queries[:5]  # cap at 5 images
 
