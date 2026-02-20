@@ -166,10 +166,16 @@ def generate_script(topic: dict, weather_data: list[dict]) -> dict:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         system=system_msg,
         messages=[{"role": "user", "content": user_msg}],
     )
+
+    if message.stop_reason == "max_tokens":
+        raise ValueError(
+            "generate_script: Claude response was cut off (max_tokens reached). "
+            "The script may be too long. Try reducing the requested word count."
+        )
 
     raw = message.content[0].text
     script = _parse_json_response(raw, context="generate_script")
@@ -189,9 +195,32 @@ def _parse_json_response(raw: str, context: str) -> dict:
     Extract JSON from a Claude response, stripping markdown code fences if present.
     Raises ValueError with context and raw text on parse failure.
     """
-    # Try to extract from ```json ... ``` or ``` ... ``` fences
+    if not raw or not raw.strip():
+        raise ValueError(
+            f"JSON parse failure in {context}: Claude returned an empty response.\n"
+            "Check that the API key is valid and the model is available."
+        )
+
+    # Try to extract from ```json ... ``` or ``` ... ``` fences first
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
-    candidate = fenced.group(1).strip() if fenced else raw.strip()
+    if fenced:
+        candidate = fenced.group(1).strip()
+        if not candidate:
+            # Fences found but empty content — fall back to raw
+            candidate = raw.strip()
+    else:
+        candidate = raw.strip()
+
+    # If there's prose before the JSON, try to find the first '{' or '['
+    if candidate and candidate[0] not in ("{", "["):
+        brace_pos = candidate.find("{")
+        bracket_pos = candidate.find("[")
+        start = min(
+            brace_pos if brace_pos != -1 else len(candidate),
+            bracket_pos if bracket_pos != -1 else len(candidate),
+        )
+        if start < len(candidate):
+            candidate = candidate[start:]
 
     try:
         return json.loads(candidate)
